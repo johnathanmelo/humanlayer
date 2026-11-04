@@ -40,8 +40,12 @@ services:
       postgres:
         condition: service_healthy
 
+  # MinIO stopped publishing its community images (docker.io/minio/* and quay.io/minio/*),
+  # so this uses Chainguard's builds. They are distroless (no shell, no mc in the server
+  # image): there is no container healthcheck, and minio-setup retries until MinIO answers.
+  # Devstack's own readiness probe checks the bucket over S3.
   minio:
-    image: docker.io/minio/minio:latest
+    image: cgr.dev/chainguard/minio:latest
     environment:
       MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-minioadmin}
       MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-minioadmin}
@@ -51,23 +55,16 @@ services:
     command: server /data --console-address ":9001"
     volumes:
       - minio_data:/data
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
 
   minio-setup:
-    image: docker.io/minio/mc:latest
+    image: cgr.dev/chainguard/minio-client:latest
     depends_on:
       minio:
-        condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-      mc alias set local http://minio:9000 ${S3_ACCESS_KEY_ID:-minioadmin} ${S3_SECRET_ACCESS_KEY:-minioadmin};
-      mc mb --ignore-existing local/${S3_ARTIFACTS_BUCKET:-riptide-artifacts};
-      exit 0;
-      "
+        condition: service_started
+    restart: on-failure
+    environment:
+      MC_HOST_local: http://${S3_ACCESS_KEY_ID:-minioadmin}:${S3_SECRET_ACCESS_KEY:-minioadmin}@minio:9000
+    command: ["mb", "--ignore-existing", "local/${S3_ARTIFACTS_BUCKET:-riptide-artifacts}"]
 
   durable-streams:
     image: humanlayer/durable-streams-server:0.3.0-cebb50e
