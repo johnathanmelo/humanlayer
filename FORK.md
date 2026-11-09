@@ -40,7 +40,12 @@ Watch these when you pull from `upstream`:
   `minio-client`), because MinIO stopped publishing community images. If upstream fixes MinIO
   itself, prefer their version.
 - `scripts/humanlayer-up.sh`: starts the whole stack with one command
-  (`--stop`, `--restart`, `--no-open`).
+  (`--stop`, `--restart`, `--no-open`, `--dev-ui`, `--rebuild-ui`). By default it serves a
+  production build of `riptide-ui` with `vite preview` (tmux window `ui`), because the Vite dev
+  server renders large documents much more slowly. It rebuilds only when the UI sources, the
+  workspace packages, `bun.lock` or the `VITE_` variables change (stamp in
+  `apps/riptide-ui/dist/.humanlayer-build-stamp`). A build takes 2-3 minutes and up to about
+  8 GB of RAM. Use `--dev-ui` when you are changing the UI and want hot reload.
 - Server-side AI calls (task and session titles, task intent, research, design-doc questions,
   next-step extraction) run through your local Claude Code login when `ANTHROPIC_API_KEY` is
   not set. Each call starts one headless `claude` process with no tools, MCP servers, settings
@@ -57,6 +62,24 @@ Watch these when you pull from `upstream`:
   If upstream changes the models in `models.ts` or `reliable-language-model.ts`, keep their model
   IDs in the `anthropic(...)` branch. If the daemon upgrades `@anthropic-ai/claude-agent-sdk`,
   bump `packages/ai` to the same version.
+
+  The provider runs at most 3 `claude` processes at once (`HUMANLAYER_CLAUDE_CODE_MAX_CONCURRENCY`)
+  and starts them with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`. Without `OPENAI_API_KEY`,
+  `reliable-language-model.ts` returns the primary model directly instead of retrying it before a
+  fallback that cannot work.
+- Large Markdown documents: changes to upstream files that cut repeated work per edit. Expect
+  conflicts here when upstream touches the same code; keep the behavior, take their structure.
+  - `packages/ai/src/agents/design-doc-open-questions/check-if-design-doc-has-open-questions.ts`:
+    the open-questions count is cached by content hash (`createCachedQuestionCounter`), so the
+    same design doc never pays for a second Sonnet call.
+  - `apps/riptide-daemon/src/lib/artifact-sync-ledger.ts` and `artifact-sync-utils.ts`
+    (`syncArtifactRead`, `findUnchangedTextRead`, `rememberDesignQuestions`,
+    `parseArtifactFrontmatter`): a Read of an unchanged design doc repeats the session's last
+    answer instead of uploading again, and gray-matter is called with options so it stops
+    caching every document version in daemon memory.
+  - `apps/riptide-daemon/src/agents/claudecode/hooks/artifact-read-sync-hook.ts`,
+    `artifact-sync-hook.ts` (Write no longer sends the body twice), `agents/codelayer/hooks.ts`
+    and `effects/services/fold-sessions/fold-product-hooks.ts` use them.
 - `FORK.md`: this file.
 
 ## What is not in git

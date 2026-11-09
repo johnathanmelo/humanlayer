@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
 # Start the self-hosted HumanLayer stack for this checkout with one command.
 #
-#   ./scripts/humanlayer-up.sh            start everything, wait until healthy, open the app
-#   ./scripts/humanlayer-up.sh --no-open  same, without opening the browser
-#   ./scripts/humanlayer-up.sh --restart  restart the app processes even if they are healthy
-#   ./scripts/humanlayer-up.sh --stop     stop the app processes and the containers
+#   ./scripts/humanlayer-up.sh              start everything, wait until healthy, open the app
+#   ./scripts/humanlayer-up.sh --no-open    same, without opening the browser
+#   ./scripts/humanlayer-up.sh --restart    restart the app processes even if they are healthy
+#   ./scripts/humanlayer-up.sh --dev-ui     serve the UI from the Vite dev server (hot reload)
+#   ./scripts/humanlayer-up.sh --rebuild-ui build the UI again even if its sources did not change
+#   ./scripts/humanlayer-up.sh --stop       stop the app processes and the containers
 #
 # What it does:
 #   1. Checks the tools it needs (Docker, Bun, Node >= 24, tmux, Caddy) and the setup files.
 #   2. Runs `devstack sync --compose`: starts Postgres, Electric, Redis, MinIO and
 #      durable-streams, applies database migrations, refreshes the generated .env block and
 #      the Caddy routes.
-#   3. Starts the API, UI, cloud app, sync proxy, daemon and Caddy in a tmux session. It uses
-#      `riptide:node-proxy` so the Electric proxy runs on real Node (it crashes under Bun).
-#   4. Waits until the app, API and sync routes answer over HTTPS, then opens the app.
+#   3. Builds the UI for production when its sources changed since the last build. A production
+#      build renders large documents much faster than the Vite dev server: no development React,
+#      no StrictMode double renders, no devtools plugins. --dev-ui skips this.
+#   4. Starts the API, cloud app, sync proxy, daemon and Caddy in a tmux session, and serves the
+#      built UI with `vite preview` in the session's `ui` window. It uses the `dev:node-proxy`
+#      tasks so the Electric proxy runs on real Node (it crashes under Bun).
+#   5. Waits until the app, API and sync routes answer over HTTPS, then opens the app.
 #
 # Safe to run again at any time: a healthy stack is left alone.
 
@@ -22,17 +28,24 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_DIR="$HOME/.humanlayer/dev"
 SYNC_LOG="$STATE_DIR/humanlayer-up-sync.log"
+UI_BUILD_LOG="$STATE_DIR/humanlayer-up-ui-build.log"
+UI_DIST="$REPO_ROOT/apps/riptide-ui/dist"
+UI_BUILD_STAMP="$UI_DIST/.humanlayer-build-stamp"
 HEALTH_TIMEOUT_SECONDS=240
 
 OPEN_BROWSER=true
 ACTION=up
+UI_MODE=prod
+REBUILD_UI=false
 for arg in "$@"; do
 	case "$arg" in
 		--no-open) OPEN_BROWSER=false ;;
 		--restart) ACTION=restart ;;
 		--stop) ACTION=stop ;;
+		--dev-ui) UI_MODE=dev ;;
+		--rebuild-ui) REBUILD_UI=true ;;
 		-h | --help)
-			sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+			sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
 			exit 0
 			;;
 		*)
@@ -166,6 +179,9 @@ check_setup() {
 		"Regenerate it with: bun --bun run devstack sync --compose"
 	TMUX_SESSION="riptide-$STACK_ID"
 	APP_URL="https://app.$STACK_ID.localhost"
+	# Same default as apps/riptide-ui/vite.config.ts; Caddy proxies the app route to this port.
+	UI_PORT="$(env_value RIPTIDE_UI_PORT)"
+	UI_PORT="${UI_PORT:-3000}"
 }
 
 # ---------------------------------------------------------------------------
@@ -187,12 +203,19 @@ session_exists() {
 }
 
 session_exited() {
-	tmux capture-pane -p -J -t "=$TMUX_SESSION:" -S -5000 2>/dev/null | grep -q '^\[humanlayer exited\]'
+	tmux capture-pane -p -J -t "=$TMUX_SESSION:" -S -5000 2>/dev/null | grep -q '^\[humanlayer exited\]' ||
+		tmux capture-pane -p -J -t "=$TMUX_SESSION:ui" -S -200 2>/dev/null | grep -q '^\[humanlayer ui exited\]'
+}
+
+# The UI mode of the running session: a production session has a `ui` window for `vite preview`.
+running_ui_mode() {
+	if tmux list-windows -t "=$TMUX_SESSION" -F '#W' 2>/dev/null | grep -qx ui; then echo prod; else echo dev; fi
 }
 
 show_recent_logs() {
 	local output caddy_error
 	output="$(tmux capture-pane -p -J -t "=$TMUX_SESSION:" -S -5000 2>/dev/null || true)"
+	output+=$'\n'"$(tmux capture-pane -p -J -t "=$TMUX_SESSION:ui" -S -200 2>/dev/null || true)"
 	echo
 	echo "${DIM}Last lines from the app processes (tmux session $TMUX_SESSION):${RESET}"
 	printf '%s\n' "$output" |
@@ -218,6 +241,35 @@ start_services() {
 		die "devstack sync failed." "Full log: $SYNC_LOG"
 	fi
 	ok "Postgres, Electric, Redis, MinIO and durable-streams are up"
+}
+
+# A hash of everything the UI build depends on: the commit, uncommitted and untracked changes in
+# the UI and the workspace packages it bundles, the lockfile, and the VITE_ variables Vite inlines.
+ui_build_stamp() {
+	local paths=(apps/riptide-ui packages contracts package.json bun.lock)
+	{
+		git -C "$REPO_ROOT" rev-parse HEAD
+		git -C "$REPO_ROOT" diff HEAD -- "${paths[@]}"
+		git -C "$REPO_ROOT" ls-files -z --others --exclude-standard -- "${paths[@]}" |
+			(cd "$REPO_ROOT" && xargs -0 -r sha256sum)
+		grep '^VITE_' "$REPO_ROOT/.env" || true
+	} | sha256sum | cut -d' ' -f1
+}
+
+build_ui_if_needed() {
+	local stamp
+	stamp="$(ui_build_stamp)"
+	if [ "$REBUILD_UI" = false ] && [ -f "$UI_DIST/index.html" ] && [ "$(cat "$UI_BUILD_STAMP" 2>/dev/null)" = "$stamp" ]; then
+		ok "The UI build is up to date"
+		return
+	fi
+	step "Building the UI for production (a minute or two)"
+	if ! (cd "$REPO_ROOT/apps/riptide-ui" && bun --bun --env-file=../../.env run vite build --sourcemap false >"$UI_BUILD_LOG" 2>&1); then
+		tail -20 "$UI_BUILD_LOG" >&2
+		die "The UI build failed." "Full log: $UI_BUILD_LOG" "To use the Vite dev server instead, run: $0 --dev-ui"
+	fi
+	printf '%s\n' "$stamp" >"$UI_BUILD_STAMP"
+	ok "Built the UI"
 }
 
 stop_app_processes() {
@@ -262,12 +314,30 @@ stop_leftover_processes() {
 
 start_app_processes() {
 	step "Starting the app processes"
-	local cmd
+	local cmd services ui_cmd
+	if [ "$UI_MODE" = dev ]; then
+		services="bun run riptide:node-proxy"
+	else
+		# riptide:node-proxy without the UI dev server: the built UI is served from the `ui` window.
+		# With .devstack.json present, the caddy script only makes sure the shared Caddy runs.
+		services="bun run caddy; bun x turbo run dev:node-proxy --filter @humanlayer/riptide-daemon"
+		services+=" --filter @humanlayer/riptide-api --filter @humanlayer/riptide-electric-proxy"
+		services+=" --filter @humanlayer/riptide-cloud --env-mode=loose"
+	fi
 	# DAEMON_IDENTITY would make the local daemon impersonate another host; never inherit it.
 	cmd="cd $(printf '%q' "$REPO_ROOT") && env -u DAEMON_IDENTITY -u RIPTIDE_DAEMON_EXPECTED_IDENTITY"
-	cmd+=" PATH=$(printf '%q' "$PATH") bun run riptide:node-proxy; echo; echo '[humanlayer exited]'; exec bash"
+	cmd+=" PATH=$(printf '%q' "$PATH") bash -c $(printf '%q' "$services"); echo; echo '[humanlayer exited]'; exec bash"
 	tmux new-session -d -s "$TMUX_SESSION" -c "$REPO_ROOT" "$cmd"
-	ok "Started in tmux session $TMUX_SESSION"
+	if [ "$UI_MODE" = prod ]; then
+		ui_cmd="cd $(printf '%q' "$REPO_ROOT/apps/riptide-ui") && PATH=$(printf '%q' "$PATH")"
+		ui_cmd+=" bun --bun --env-file=../../.env run vite preview --host 127.0.0.1 --port $UI_PORT --strictPort"
+		ui_cmd+="; echo; echo '[humanlayer ui exited]'; exec bash"
+		# -d keeps the services window current, which send-keys and session_exited target.
+		tmux new-window -d -t "=$TMUX_SESSION:" -n ui -c "$REPO_ROOT/apps/riptide-ui" "$ui_cmd"
+		ok "Started in tmux session $TMUX_SESSION (built UI in window \"ui\")"
+	else
+		ok "Started in tmux session $TMUX_SESSION (UI from the Vite dev server)"
+	fi
 }
 
 wait_until_healthy() {
@@ -313,13 +383,17 @@ do_up() {
 	check_tools
 	check_setup
 
-	if [ "$ACTION" = up ] && session_exists && ! session_exited && stack_healthy; then
+	if [ "$ACTION" = up ] && session_exists && ! session_exited && stack_healthy &&
+		[ "$(running_ui_mode)" = "$UI_MODE" ] && [ "$REBUILD_UI" = false ]; then
 		step "HumanLayer is already running"
 		print_summary
 		return
 	fi
 
 	start_services
+	# Build before stopping, so the running app keeps serving during the build and a failed
+	# build leaves it untouched.
+	[ "$UI_MODE" = dev ] || build_ui_if_needed
 	stop_app_processes
 	start_app_processes
 	wait_until_healthy
