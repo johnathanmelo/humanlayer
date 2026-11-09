@@ -10,6 +10,7 @@ import { defineConfig, loadEnv, type PluginOption } from 'vite'
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url)).replace(/\/+$/, '')
 const env = { ...loadEnv(process.env.NODE_ENV ?? 'development', repoRoot, ''), ...process.env }
 const isElectronPackageBuild = env.RIPTIDE_ELECTRON_PACKAGE_BUILD === 'true'
+const fullDevtools = env.RIPTIDE_UI_FULL_DEVTOOLS === 'true'
 
 const electronContentSecurityPolicy = [
 	"default-src 'self'",
@@ -70,6 +71,12 @@ const plugins: PluginOption[] = [
 		eventBusConfig: {
 			port: Number(env.RIPTIDE_UI_TANSTACK_DEVTOOLS_PORT) || 42070,
 		},
+		// Fork-only: off unless RIPTIDE_UI_FULL_DEVTOOLS=true. Source injection adds an AST pass
+		// and a data-tsd-source attribute to every JSX element of every module, and console
+		// piping sends every console call through the event bus, which slows the dev server.
+		injectSource: { enabled: fullDevtools },
+		consolePiping: { enabled: fullDevtools },
+		enhancedLogs: { enabled: fullDevtools },
 	}),
 	tanstackRouter({
 		target: 'react',

@@ -95,6 +95,9 @@ Watch these when you pull from `upstream`:
   - `apps/riptide-ui/src/components/artifact-viewer-v2/useArtifactVersions.ts` hashes the document
     only while the version view is open; `apps/riptide-ui/src/minimalist/components/Prose.tsx` and
     `ArtifactPanel.tsx` reuse rendered blocks and memoize comment threads.
+  - `apps/riptide-ui/vite.config.ts`: the TanStack devtools plugin runs without source injection,
+    console piping and enhanced logs. Set `RIPTIDE_UI_FULL_DEVTOOLS=true` in `.env` to turn them
+    back on (for example, to click from the devtools to a component's source).
 - `FORK.md`: this file.
 
 ## What is not in git
