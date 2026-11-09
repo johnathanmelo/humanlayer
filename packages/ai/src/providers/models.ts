@@ -5,12 +5,34 @@ import * as Sentry from '@sentry/core'
 
 import { logger } from '../logger'
 import { createReliableLanguageModel } from '../reliable-language-model'
+import { createClaudeCodeLanguageModel, shouldUseClaudeCodeLogin } from './claude-code-language-model'
 
 export type ModelAlias = 'sonnet' | 'haiku'
 
-const PRIMARY: Record<ModelAlias, LanguageModelV3> = {
-	sonnet: anthropic('claude-sonnet-5'),
-	haiku: anthropic('claude-haiku-4-5'),
+// Fork-only: without ANTHROPIC_API_KEY, the primary models run through the local Claude Code
+// login. See FORK.md.
+const useClaudeCodeLogin = shouldUseClaudeCodeLogin()
+
+const PRIMARY: Record<ModelAlias, LanguageModelV3> = useClaudeCodeLogin
+	? {
+			sonnet: createClaudeCodeLanguageModel('sonnet'),
+			haiku: createClaudeCodeLanguageModel('haiku'),
+		}
+	: {
+			sonnet: anthropic('claude-sonnet-5'),
+			haiku: anthropic('claude-haiku-4-5'),
+		}
+
+if (useClaudeCodeLogin) {
+	logger.info(
+		{ event: 'ai_provider_claude_code' },
+		'ANTHROPIC_API_KEY not set — AI calls run through the local Claude Code login',
+	)
+}
+
+/** Fork-only: the primary model for an alias, without the OpenAI fallback wrapper. */
+export function resolvePrimaryModel(alias: ModelAlias): LanguageModelV3 {
+	return PRIMARY[alias]
 }
 
 const isFallbackEnabled = Boolean(process.env.OPENAI_API_KEY?.trim())

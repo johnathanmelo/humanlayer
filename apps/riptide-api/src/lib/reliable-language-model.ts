@@ -1,6 +1,6 @@
-import { anthropic } from '@ai-sdk/anthropic'
 import { openai } from '@ai-sdk/openai'
 import type { LanguageModelV3 } from '@ai-sdk/provider'
+import { resolvePrimaryModel } from '@humanlayer/ai/providers'
 import { createReliableLanguageModel } from '@humanlayer/ai/reliable-language-model'
 
 import { Sentry } from '../instrument'
@@ -8,9 +8,11 @@ import { logger } from '../logger'
 
 type RiptideModelAlias = 'haiku' | 'sonnet'
 
+// Fork-only: resolvePrimaryModel returns the Anthropic API models when ANTHROPIC_API_KEY is set,
+// and the local Claude Code login otherwise. See FORK.md.
 const PRIMARY: Record<RiptideModelAlias, LanguageModelV3> = {
-	haiku: anthropic('claude-haiku-4-5'),
-	sonnet: anthropic('claude-sonnet-5'),
+	haiku: resolvePrimaryModel('haiku'),
+	sonnet: resolvePrimaryModel('sonnet'),
 }
 
 const SECONDARY: Record<RiptideModelAlias, LanguageModelV3> = {

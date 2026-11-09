@@ -41,6 +41,22 @@ Watch these when you pull from `upstream`:
   itself, prefer their version.
 - `scripts/humanlayer-up.sh`: starts the whole stack with one command
   (`--stop`, `--restart`, `--no-open`).
+- Server-side AI calls (task and session titles, task intent, research, design-doc questions,
+  next-step extraction) run through your local Claude Code login when `ANTHROPIC_API_KEY` is
+  not set. Each call starts one headless `claude` process with no tools, MCP servers, settings
+  or saved session, using the `haiku` or `sonnet` alias. Set `HUMANLAYER_AI_PROVIDER=anthropic`
+  to go back to the API key, or `=claude-code` to use the login even when a key is set.
+  The files involved:
+  - `packages/ai/src/providers/claude-code-language-model.ts` (new) and its `.vi.test.ts`
+  - `packages/ai/src/providers/models.ts` (picks the primary model, adds `resolvePrimaryModel`)
+  - `packages/ai/src/providers/index.ts` (exports `resolvePrimaryModel`)
+  - `apps/riptide-api/src/lib/reliable-language-model.ts` (uses `resolvePrimaryModel`)
+  - `packages/ai/package.json` and `bun.lock` (adds `@anthropic-ai/claude-agent-sdk`, the
+    version the daemon uses)
+
+  If upstream changes the models in `models.ts` or `reliable-language-model.ts`, keep their model
+  IDs in the `anthropic(...)` branch. If the daemon upgrades `@anthropic-ai/claude-agent-sdk`,
+  bump `packages/ai` to the same version.
 - `FORK.md`: this file.
 
 ## What is not in git
