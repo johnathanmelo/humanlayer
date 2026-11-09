@@ -456,6 +456,72 @@ describe('createArtifactReadSyncHook', () => {
 		})
 	})
 
+	describe('design-discussion docs', () => {
+		const designDoc = (body: string) => `---\ntype: design-discussion\n---\n${body}`
+
+		function createDesignSyncManager(collectionHash: () => string) {
+			const calls: Array<Parameters<ISyncManager['upsertArtifact']>[0]> = []
+			const manager: ISyncManager & { calls: typeof calls } = {
+				calls,
+				upsertArtifact: async (input) => {
+					calls.push(input)
+					return { artifactId: 'design-artifact-id', designQuestionsResolved: true }
+				},
+				uploadS3Artifact: async () => ({ artifactId: 'mock-s3-artifact-id' }),
+				getCollection: () =>
+					({
+						toArray: [{ file_name: 'design.md', content_hash: collectionHash(), id: 'design-artifact-id' }],
+					}) as any,
+			}
+			return manager
+		}
+
+		test('uploads an unchanged design doc once, then repeats the answer without another upsert', async () => {
+			await withArtifactReadHookTest(async ({ testDir, createHook }) => {
+				const content = designDoc('# Design\n\n### Design Questions (all resolved)')
+				const manager = createDesignSyncManager(() => hash(content))
+				const filePath = join(testDir, 'rpi', 'tasks', taskSlug, 'design.md')
+				await writeFile(filePath, content)
+				const hook = createHook(manager)
+				const read = () =>
+					hook(createHookInput({ tool_input: { file_path: filePath } }), undefined, {
+						signal: new AbortController().signal,
+					})
+
+				const first = await read()
+				const second = await read()
+
+				expect(manager.calls).toHaveLength(1)
+				expect(second).toEqual(first)
+				expect(JSON.stringify(second)).toContain('No open design questions remain')
+			})
+		})
+
+		test('uploads again when the design doc changes', async () => {
+			await withArtifactReadHookTest(async ({ testDir, createHook }) => {
+				let content = designDoc('# Design v1')
+				const manager = createDesignSyncManager(() => hash(content))
+				const filePath = join(testDir, 'rpi', 'tasks', taskSlug, 'design.md')
+				await writeFile(filePath, content)
+				const hook = createHook(manager)
+				const read = () =>
+					hook(createHookInput({ tool_input: { file_path: filePath } }), undefined, {
+						signal: new AbortController().signal,
+					})
+
+				await read()
+				content = designDoc('# Design v2')
+				await writeFile(filePath, content)
+				await read()
+
+				expect(manager.calls.map((call) => call.content)).toEqual([
+					designDoc('# Design v1'),
+					designDoc('# Design v2'),
+				])
+			})
+		})
+	})
+
 	describe('frontmatter parsing', () => {
 		test('parses YAML frontmatter from disk content and passes to upsertArtifact', async () => {
 			await withArtifactReadHookTest(async ({ testDir }) => {

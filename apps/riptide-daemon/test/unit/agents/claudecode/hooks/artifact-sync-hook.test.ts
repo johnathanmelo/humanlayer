@@ -208,9 +208,9 @@ describe('createArtifactSyncHook', () => {
 				content: '# Test Content',
 				frontmatter: {},
 				operationType: 'Write',
+				// The body travels once, as the artifact content.
 				operationContents: {
 					file_path: `${cwd}/rpi/tasks/${taskSlug}/test.md`,
-					content: '# Test Content',
 				},
 			})
 		})

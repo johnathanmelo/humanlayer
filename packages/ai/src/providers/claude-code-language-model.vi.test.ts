@@ -7,6 +7,8 @@ import { z } from 'zod'
 import {
 	type ClaudeCodeQuery,
 	createClaudeCodeLanguageModel,
+	createConcurrencyLimiter,
+	maxConcurrencyFromEnv,
 	shouldUseClaudeCodeLogin,
 	toClaudeCodePrompt,
 } from './claude-code-language-model'
@@ -214,5 +216,93 @@ describe('createClaudeCodeLanguageModel', () => {
 		}
 
 		expect(parts.join('')).toBe('Streamed answer')
+	})
+})
+
+describe('createConcurrencyLimiter', () => {
+	test('runs at most max calls at once and hands slots over in order', async () => {
+		const limiter = createConcurrencyLimiter(2)
+		const order: string[] = []
+
+		const releaseA = await limiter.acquire()
+		const releaseB = await limiter.acquire()
+		const waitingC = limiter.acquire().then((release) => {
+			order.push('c')
+			return release
+		})
+		const waitingD = limiter.acquire().then((release) => {
+			order.push('d')
+			return release
+		})
+		await Promise.resolve()
+		expect(order).toEqual([])
+
+		releaseA()
+		releaseA() // releasing twice frees only one slot
+		const releaseC = await waitingC
+		await Promise.resolve()
+		expect(order).toEqual(['c'])
+
+		releaseB()
+		const releaseD = await waitingD
+		expect(order).toEqual(['c', 'd'])
+		releaseC()
+		releaseD()
+
+		// All slots are free again.
+		const [x, y] = await Promise.all([limiter.acquire(), limiter.acquire()])
+		x()
+		y()
+	})
+
+	test('rejects a waiting call when its signal aborts, without taking a slot', async () => {
+		const limiter = createConcurrencyLimiter(1)
+		const release = await limiter.acquire()
+		const controller = new AbortController()
+
+		const waiting = limiter.acquire(controller.signal)
+		controller.abort(new Error('caller gave up'))
+		await expect(waiting).rejects.toThrow('caller gave up')
+
+		release()
+		const next = await limiter.acquire()
+		next()
+	})
+
+	test('reads the shared limit from the environment', () => {
+		expect(maxConcurrencyFromEnv({})).toBe(3)
+		expect(maxConcurrencyFromEnv({ HUMANLAYER_CLAUDE_CODE_MAX_CONCURRENCY: '5' })).toBe(5)
+		expect(maxConcurrencyFromEnv({ HUMANLAYER_CLAUDE_CODE_MAX_CONCURRENCY: '0' })).toBe(3)
+		expect(maxConcurrencyFromEnv({ HUMANLAYER_CLAUDE_CODE_MAX_CONCURRENCY: 'many' })).toBe(3)
+	})
+})
+
+describe('createClaudeCodeLanguageModel concurrency', () => {
+	test('starts the next Claude Code process only after one finishes', async () => {
+		let running = 0
+		let maxRunning = 0
+		const runQuery: ClaudeCodeQuery = () =>
+			(async function* () {
+				running++
+				maxRunning = Math.max(maxRunning, running)
+				await new Promise((resolve) => setTimeout(resolve, 5))
+				running--
+				yield successResult({ result: 'ok' })
+			})()
+		const model = createClaudeCodeLanguageModel('haiku', { runQuery, maxConcurrency: 1 })
+
+		const results = await Promise.all([1, 2, 3].map(() => generateText({ model, prompt: 'Hi', maxRetries: 0 })))
+
+		expect(results.map((result) => result.text)).toEqual(['ok', 'ok', 'ok'])
+		expect(maxRunning).toBe(1)
+	})
+
+	test('turns off nonessential traffic for each process', async () => {
+		const { runQuery, calls } = fakeQuery([successResult({ result: 'ok' })])
+		const model = createClaudeCodeLanguageModel('haiku', { runQuery, maxConcurrency: 1 })
+
+		await generateText({ model, prompt: 'Hi', maxRetries: 0 })
+
+		expect(calls[0]?.options.env?.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe('1')
 	})
 })

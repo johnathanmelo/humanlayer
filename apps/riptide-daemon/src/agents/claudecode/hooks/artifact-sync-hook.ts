@@ -6,7 +6,12 @@ import { isDefinedError } from '@orpc/client'
 import { Sentry } from '@/instrument'
 import { extractArtifactSubpath, getArtifactSubpathPrefixes, isArtifactTrashPath } from '@/lib/artifact-subpath'
 import { type ArtifactSyncLedger, createArtifactSyncLedger, recordSyncedFile } from '@/lib/artifact-sync-ledger'
-import { buildDesignResolvedTemplateContext, isTextFile, syncFileAtPath } from '@/lib/artifact-sync-utils'
+import {
+	buildDesignResolvedTemplateContext,
+	isTextFile,
+	rememberDesignQuestions,
+	syncFileAtPath,
+} from '@/lib/artifact-sync-utils'
 import { ARTIFACT_TRASH_SKIP_CONTEXT } from '@/lib/artifact-trash'
 import type { ISyncManager } from '@/lib/sync-service'
 import logger from '@/logger'
@@ -41,6 +46,21 @@ function getWriteContent(toolInput: unknown): string | undefined {
 		}
 	}
 	return undefined
+}
+
+/**
+ * The tool input to store in the operation log. A Write's body already travels as the artifact
+ * content, so it is left out here, as the plugin SDK does: repeating it doubled every Write
+ * request and stored the document a second time.
+ */
+function operationContentsFor(
+	operationType: 'Write' | 'Edit' | 'MultiEdit',
+	toolInput: unknown,
+): Record<string, unknown> {
+	if (typeof toolInput !== 'object' || toolInput === null) return {}
+	if (operationType !== 'Write') return toolInput as Record<string, unknown>
+	const { content: _content, ...rest } = toolInput as Record<string, unknown>
+	return rest
 }
 
 /**
@@ -139,16 +159,18 @@ export function createArtifactSyncHook(
 				return { continue: true }
 			}
 
-			const { artifactId, designQuestionsResolved, documentType } = await syncFileAtPath(
+			const syncResult = await syncFileAtPath(
 				resolvedFilePath,
 				operationType,
 				syncManager,
 				sessionId,
 				subpathPrefixes,
 				writeContent,
-				input.tool_input as Record<string, unknown>,
+				operationContentsFor(operationType, input.tool_input),
 			)
+			const { artifactId, designQuestionsResolved, documentType } = syncResult
 			await recordSyncedFile(ledger, fileName, resolvedFilePath)
+			rememberDesignQuestions(ledger, syncResult)
 			const cloudUrl = getArtifactCloudUrlFn(artifactId)
 
 			if (!isTextFile(fileName)) {

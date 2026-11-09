@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+
 import * as Sentry from '@sentry/core'
 import { Context, Data, Effect, Layer, Schedule } from 'effect'
 
@@ -15,8 +17,45 @@ export class DesignDocQuestionCounter extends Context.Service<
 	}
 >()('DesignDocQuestionCounter') {}
 
+const DEFAULT_COUNT_CACHE_ENTRIES = 100
+
+/**
+ * Fork-only: wraps a question counter so the same document content is counted once.
+ * The daemon re-uploads design-discussion docs on every Read and Edit, and each count is a full
+ * Sonnet call over the whole document, so unchanged content must not pay for it again. Calls
+ * for the same content share one in-flight promise; a failed count leaves the cache, so a
+ * retry runs the model again. Least recently used entries are evicted past `maxEntries`.
+ */
+export function createCachedQuestionCounter(
+	count: (docContent: string) => Promise<DesignDocQuestionCounts>,
+	{ maxEntries = DEFAULT_COUNT_CACHE_ENTRIES }: { maxEntries?: number } = {},
+): (docContent: string) => Promise<DesignDocQuestionCounts> {
+	const cache = new Map<string, Promise<DesignDocQuestionCounts>>()
+	return (docContent) => {
+		const key = createHash('sha256').update(docContent).digest('hex')
+		const cached = cache.get(key)
+		if (cached) {
+			// Re-insert so the Map's insertion order tracks recency.
+			cache.delete(key)
+			cache.set(key, cached)
+			return cached
+		}
+		const pending = count(docContent)
+		cache.set(key, pending)
+		pending.catch(() => {
+			if (cache.get(key) === pending) cache.delete(key)
+		})
+		while (cache.size > maxEntries) {
+			const oldest = cache.keys().next().value
+			if (oldest === undefined) break
+			cache.delete(oldest)
+		}
+		return pending
+	}
+}
+
 export const DesignDocQuestionCounterLive = Layer.succeed(DesignDocQuestionCounter, {
-	count: inferDesignDocQuestionCounts,
+	count: createCachedQuestionCounter(inferDesignDocQuestionCounts),
 })
 
 const retrySchedule = Schedule.exponential('500 millis').pipe(Schedule.upTo({ times: 2 }))

@@ -45,6 +45,8 @@ export interface SyncResult {
 	fileName: string
 	designQuestionsResolved?: boolean
 	documentType?: string
+	/** ohash of the synced text, as the cloud stores it in content_hash. Text files only. */
+	contentHash?: string
 }
 
 /** Document types that support design question resolution detection */
@@ -324,14 +326,7 @@ export async function syncTextFile(
 	syncManager: ISyncManager,
 	sessionId: string,
 ): Promise<SyncResult> {
-	// Parse YAML frontmatter
-	let frontmatter: Record<string, unknown> = {}
-	try {
-		const { data } = matter(content)
-		frontmatter = data
-	} catch {
-		// Non-blocking: if frontmatter parsing fails, use empty object
-	}
+	const frontmatter = parseArtifactFrontmatter(content)
 
 	const { artifactId, designQuestionsResolved } = await syncManager.upsertArtifact({
 		fileName,
@@ -348,7 +343,7 @@ export async function syncTextFile(
 	)
 
 	const documentType = typeof frontmatter.type === 'string' ? frontmatter.type : undefined
-	return { artifactId, cloudUrl, fileName, designQuestionsResolved, documentType }
+	return { artifactId, cloudUrl, fileName, designQuestionsResolved, documentType, contentHash: hash(content) }
 }
 
 /**
@@ -375,6 +370,106 @@ export async function syncFileAtPath(
 
 	const content = providedContent ?? (await readFile(filePath, 'utf-8'))
 	return syncTextFile(filePath, fileName, content, operationType, operationContents, syncManager, sessionId)
+}
+
+/**
+ * Keep the cloud's design-question answer for a synced design-discussion doc, so a later Read of
+ * the same content can report it without another upsert.
+ */
+export function rememberDesignQuestions(ledger: ArtifactSyncLedger, result: SyncResult): void {
+	if (result.documentType !== 'design-discussion' || result.contentHash === undefined) return
+	ledger.recordDesignQuestions(result.fileName, result.contentHash, result.designQuestionsResolved)
+}
+
+/**
+ * Sync a Read of an artifact file. A text file whose exact content the cloud already holds is
+ * not uploaded again; for a design-discussion doc that also needs the design-question answer
+ * this session already got for that content. Everything else upserts as before.
+ */
+export async function syncArtifactRead(
+	filePath: string,
+	syncManager: ISyncManager,
+	sessionId: string,
+	artifactSubpathPrefixes: string[],
+	ledger: ArtifactSyncLedger,
+	providedContent?: string,
+): Promise<SyncResult> {
+	const fileName = extractArtifactSubpath(filePath, artifactSubpathPrefixes)
+	if (!fileName || !isTextFile(fileName)) {
+		return syncFileAtPath(filePath, 'Read', syncManager, sessionId, artifactSubpathPrefixes)
+	}
+
+	const content = providedContent ?? (await readFile(filePath, 'utf-8'))
+	const contentHash = hash(content)
+	const frontmatter = parseArtifactFrontmatter(content)
+	const documentType = typeof frontmatter.type === 'string' ? frontmatter.type : undefined
+	const unchanged = findUnchangedTextRead(
+		syncManager,
+		ledger,
+		fileName,
+		contentHash,
+		documentType === 'design-discussion',
+	)
+	if (unchanged) {
+		logger.debug({ sessionId, fileName }, 'Artifact read sync skipped: already synced with same content hash')
+		return {
+			artifactId: unchanged.artifactId,
+			cloudUrl: getArtifactCloudUrl(unchanged.artifactId),
+			fileName,
+			designQuestionsResolved: unchanged.designQuestionsResolved,
+			documentType,
+			contentHash,
+		}
+	}
+
+	const result = await syncTextFile(
+		filePath,
+		fileName,
+		content,
+		'Read',
+		{ file_path: filePath },
+		syncManager,
+		sessionId,
+	)
+	rememberDesignQuestions(ledger, result)
+	return result
+}
+
+/**
+ * The artifact a Read can report without an upsert: the cloud holds this exact content as text
+ * and, for a design-discussion doc, the session already has the design-question answer for it.
+ * Undefined when the Read must upsert.
+ */
+export function findUnchangedTextRead(
+	syncManager: ISyncManager,
+	ledger: ArtifactSyncLedger,
+	fileName: string,
+	contentHash: string,
+	isDesignDiscussion: boolean,
+): { artifactId: string; designQuestionsResolved?: boolean } | undefined {
+	const status = isAlreadySynced(syncManager, fileName, contentHash)
+	if (!status.synced || !status.artifactId) return undefined
+	// A text file still stored in S3 must upload once so the cloud converts it to text storage.
+	const existing = syncManager.getCollection()?.toArray.find((artifact) => artifact.file_name === fileName)
+	if (existing?.storage_type === 's3') return undefined
+	if (!isDesignDiscussion) return { artifactId: status.artifactId }
+	const remembered = ledger.designQuestionsFor(fileName, contentHash)
+	if (!remembered) return undefined
+	return { artifactId: status.artifactId, designQuestionsResolved: remembered.designQuestionsResolved }
+}
+
+/**
+ * The YAML frontmatter of a text artifact, or {} when it has none or it does not parse.
+ * Passes options to gray-matter on purpose: without them gray-matter caches every input it parses,
+ * keyed by the full text, for the life of the process, so every version of every document stayed
+ * in daemon memory until restart.
+ */
+export function parseArtifactFrontmatter(content: string): Record<string, unknown> {
+	try {
+		return matter(content, {}).data
+	} catch {
+		return {}
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

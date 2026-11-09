@@ -208,7 +208,8 @@ describe('Artifact Sync Integration', () => {
 					content,
 					frontmatter: {},
 					operationType: 'Write',
-					operationContents: { file_path: filePath, content },
+					// The body travels once, as the artifact content.
+					operationContents: { file_path: filePath },
 				})
 			})
 		})

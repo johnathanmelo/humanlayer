@@ -14,21 +14,18 @@ import type { ApprovalHook, DoneResult, PostToolUseHook, PostToolUseHookContext 
 import type { Session } from '@humanlayer/db/tables/sessions'
 import type { TaskWorkflowType, WorktreeTiming } from '@humanlayer/schemas/effect/taskconfiguration'
 import { isDefinedError } from '@orpc/client'
-import matter from 'gray-matter'
 
 import { Sentry } from '@/instrument'
 import { extractArtifactSubpath, getArtifactSubpathPrefixes, isArtifactTrashPath } from '@/lib/artifact-subpath'
 import { createArtifactSyncLedger } from '@/lib/artifact-sync-ledger'
 import {
 	computeSha256Hash,
-	computeTextHash,
 	extractApplyPatchPaths,
 	formatMultiSyncMessage,
 	formatSyncMessage,
 	getMimeType,
 	getOperationType,
 	getTaskArtifactPathsFromApplyPatch,
-	isAlreadySynced,
 	isApplyPatchTool,
 	isEditTool,
 	isReadTool,
@@ -37,6 +34,7 @@ import {
 	isWriteTool,
 	resolveToolPath,
 	type SyncResult,
+	syncArtifactRead,
 	syncFileAtPath,
 	syncShellCreatedArtifacts,
 } from '@/lib/artifact-sync-utils'
@@ -389,6 +387,7 @@ export function createCodelayerArtifactReadSyncHook(
 ): PostToolUseHook {
 	logger.debug({ sessionId, cwd, taskId, taskSlug }, 'CodeLayer artifact read sync hook created')
 	const artifactSubpathPrefixes = getArtifactSubpathPrefixes(cwd, taskId, taskSlug)
+	const readLedger = createArtifactSyncLedger()
 
 	return async (ctx) => {
 		if (!isReadTool(ctx.toolName)) {
@@ -448,37 +447,13 @@ export function createCodelayerArtifactReadSyncHook(
 				)
 			}
 
-			// Text file: check if already synced with same hash
-			const content = await readFile(resolvedFilePath, 'utf-8')
-			const contentHash = computeTextHash(content)
-			let frontmatter: Record<string, unknown> = {}
-			try {
-				const { data } = matter(content)
-				frontmatter = data
-			} catch {
-				// Non-blocking: if frontmatter parsing fails, use empty object
-			}
-			const isDesignDiscussion = frontmatter.type === 'design-discussion'
-
-			const syncStatus = isAlreadySynced(syncManager, fileName, contentHash)
-			if (
-				syncStatus.synced &&
-				syncStatus.artifactId &&
-				existingArtifact?.storage_type !== 's3' &&
-				!isDesignDiscussion
-			) {
-				const cloudUrl = getArtifactCloudUrl(syncStatus.artifactId)
-				logger.debug({ sessionId, fileName }, 'Artifact already synced with same hash')
-				return ctx.done(formatSyncMessage(toolOutputToString(ctx.output), cloudUrl))
-			}
-
-			const result = await syncFileAtPath(
+			// Text file: skips the upload when the cloud already has this exact content
+			const result = await syncArtifactRead(
 				resolvedFilePath,
-				'Read',
 				syncManager,
 				sessionId,
 				artifactSubpathPrefixes,
-				content,
+				readLedger,
 			)
 			return ctx.done(
 				formatSyncMessage(

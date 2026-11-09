@@ -33,11 +33,18 @@ export interface ClaudeCodeLanguageModelConfig {
 	readonly runQuery?: ClaudeCodeQuery
 	/** Path to the `claude` binary. Defaults to {@link findClaudeCodeExecutable}. */
 	readonly executablePath?: string
+	/** Time limit for one call, counted after it gets a process slot. */
 	readonly timeoutMs?: number
+	/**
+	 * How many `claude` processes this model may run at once. Defaults to a limit shared by every
+	 * model in the process, read from `HUMANLAYER_CLAUDE_CODE_MAX_CONCURRENCY` (default 3).
+	 */
+	readonly maxConcurrency?: number
 }
 
 const PROVIDER = 'claude-code'
 const DEFAULT_TIMEOUT_MS = 180_000
+const DEFAULT_MAX_CONCURRENCY = 3
 const DEFAULT_SYSTEM_PROMPT = 'You are a helpful assistant.'
 const JSON_ONLY_INSTRUCTION = 'Respond with a single JSON value and nothing else.'
 
@@ -53,6 +60,64 @@ export function shouldUseClaudeCodeLogin(env: NodeJS.ProcessEnv = process.env): 
 	if (forced === 'anthropic') return false
 	if (env.VITEST || env.NODE_ENV === 'test') return false
 	return !env.ANTHROPIC_API_KEY?.trim()
+}
+
+export interface ConcurrencyLimiter {
+	/** Waits for a free slot and returns the function that frees it. Rejects if `signal` aborts first. */
+	acquire(signal?: AbortSignal): Promise<() => void>
+}
+
+/** A first-in, first-out limit on how many calls run at once. */
+export function createConcurrencyLimiter(max: number): ConcurrencyLimiter {
+	let active = 0
+	const waiting: Array<() => void> = []
+
+	const releaser = () => {
+		let released = false
+		return () => {
+			if (released) return
+			released = true
+			const next = waiting.shift()
+			// Hand the slot straight to the next waiter, so `active` stays the same.
+			if (next) next()
+			else active--
+		}
+	}
+
+	return {
+		acquire(signal) {
+			if (signal?.aborted) return Promise.reject(signal.reason ?? new Error('Aborted'))
+			if (active < max) {
+				active++
+				return Promise.resolve(releaser())
+			}
+			return new Promise((resolve, reject) => {
+				const grant = () => {
+					signal?.removeEventListener('abort', onAbort)
+					resolve(releaser())
+				}
+				const onAbort = () => {
+					const index = waiting.indexOf(grant)
+					if (index !== -1) waiting.splice(index, 1)
+					reject(signal?.reason ?? new Error('Aborted'))
+				}
+				waiting.push(grant)
+				signal?.addEventListener('abort', onAbort, { once: true })
+			})
+		},
+	}
+}
+
+export function maxConcurrencyFromEnv(env: NodeJS.ProcessEnv = process.env): number {
+	const configured = Number.parseInt(env.HUMANLAYER_CLAUDE_CODE_MAX_CONCURRENCY?.trim() ?? '', 10)
+	return Number.isInteger(configured) && configured > 0 ? configured : DEFAULT_MAX_CONCURRENCY
+}
+
+// Each call is a separate `claude` process of a few hundred MB, so all models share one limit.
+let sharedLimiter: ConcurrencyLimiter | undefined
+function getSharedLimiter(): ConcurrencyLimiter {
+	sharedLimiter ??= createConcurrencyLimiter(maxConcurrencyFromEnv())
+	return sharedLimiter
 }
 
 function isFile(candidate: string): boolean {
@@ -169,6 +234,7 @@ export function createClaudeCodeLanguageModel(
 ): LanguageModelV3 {
 	const runQuery: ClaudeCodeQuery = config.runQuery ?? query
 	const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS
+	const limiter = config.maxConcurrency ? createConcurrencyLimiter(config.maxConcurrency) : undefined
 
 	async function doGenerate(options: LanguageModelV3CallOptions): Promise<LanguageModelV3GenerateResult> {
 		if (options.tools && options.tools.length > 0) {
@@ -178,6 +244,15 @@ export function createClaudeCodeLanguageModel(
 			})
 		}
 
+		const release = await (limiter ?? getSharedLimiter()).acquire(options.abortSignal)
+		try {
+			return await generateWithSlot(options)
+		} finally {
+			release()
+		}
+	}
+
+	async function generateWithSlot(options: LanguageModelV3CallOptions): Promise<LanguageModelV3GenerateResult> {
 		const converted = toClaudeCodePrompt(options.prompt)
 		const warnings = [...converted.warnings, ...unsupportedSettingWarnings(options)]
 		const responseFormat = options.responseFormat
@@ -219,6 +294,8 @@ export function createClaudeCodeLanguageModel(
 				...process.env,
 				CLAUDE_AGENT_SDK_CLIENT_APP: 'humanlayer-api',
 				CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
+				// Skips the auto-update check and telemetry each process would otherwise do at startup.
+				CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
 			},
 			outputFormat,
 		}

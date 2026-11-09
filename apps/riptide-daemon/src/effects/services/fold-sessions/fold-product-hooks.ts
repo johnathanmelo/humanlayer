@@ -29,6 +29,7 @@ import {
 	isShellTool,
 	isWriteTool,
 	resolveToolPath,
+	syncArtifactRead,
 	syncFileAtPath,
 	syncShellCreatedArtifacts,
 	type SyncResult,
@@ -294,18 +295,20 @@ const synchronizeReadArtifact = Effect.fn('fold.artifacts.synchronize_read')(fun
 	readonly workingDirectory: string
 	readonly taskId: string
 	readonly taskSlug: string | null
+	readonly ledger: ArtifactSyncLedger
 }) {
 	if (input.hookInput.isFailure || !isReadTool(input.hookInput.toolName)) return keepToolResult
 	const fileInput = yield* Schema.decodeUnknownEffect(readToolContract.parameters)(input.hookInput.executedInput)
 	const filePath = fileInput.path
 	if (!isArtifactPath(filePath, input.workingDirectory)) return keepToolResult
+	// Skips the upload when the cloud already has this exact content.
 	const result = yield* Effect.tryPromise(() =>
-		syncFileAtPath(
+		syncArtifactRead(
 			resolveToolPath(filePath, input.workingDirectory),
-			'Read',
 			input.syncManager,
 			input.sessionId,
 			getArtifactSubpathPrefixes(input.workingDirectory, input.taskId, input.taskSlug),
+			input.ledger,
 		),
 	)
 	return yield* appendContextToToolResult({
@@ -382,13 +385,14 @@ export const makeFoldArtifactReadSyncHook = Effect.fn('fold.hooks.make_artifact_
 	readonly taskId: string
 	readonly taskSlug: string | null
 }) {
+	const ledger = createArtifactSyncLedger()
 	return {
 		name: 'humanlayer-artifact-read-sync',
 		tools: [readToolContract.name],
 		handler: Effect.fn('fold.hooks.synchronize_read_artifact')((hookInput) =>
 			runProductHookBestEffort(
 				{ sessionId: input.sessionId, hookName: 'humanlayer-artifact-read-sync' },
-				synchronizeReadArtifact({ ...input, hookInput }),
+				synchronizeReadArtifact({ ...input, hookInput, ledger }),
 			),
 		),
 	} satisfies PostToolUseHook

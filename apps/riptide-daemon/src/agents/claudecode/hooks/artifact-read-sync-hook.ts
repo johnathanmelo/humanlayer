@@ -2,7 +2,6 @@ import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 
 import type { HookCallback, HookInput, HookJSONOutput } from '@anthropic-ai/claude-agent-sdk'
-import matter from 'gray-matter'
 import { hash } from 'ohash'
 
 import { Sentry } from '@/instrument'
@@ -14,6 +13,7 @@ import {
 	getMimeType,
 	isAlreadySynced,
 	isTextFile,
+	parseArtifactFrontmatter,
 	toArrayBuffer,
 } from '@/lib/artifact-sync-utils'
 import { ARTIFACT_TRASH_SKIP_CONTEXT } from '@/lib/artifact-trash'
@@ -180,14 +180,7 @@ export function createArtifactReadSyncHook(
 			const content = await readFile(resolvedFilePath, 'utf-8')
 			const contentHash = hash(content)
 
-			// Parse YAML frontmatter from content
-			let frontmatter: Record<string, unknown> = {}
-			try {
-				const { data } = matter(content)
-				frontmatter = data
-			} catch {
-				// Non-blocking: if frontmatter parsing fails, use empty object
-			}
+			const frontmatter = parseArtifactFrontmatter(content)
 			const isDesignDiscussion = frontmatter.type === 'design-discussion'
 
 			// Skip upsert if artifact already exists in collection with same content hash.
@@ -212,6 +205,30 @@ export function createArtifactReadSyncHook(
 				return { continue: true }
 			}
 
+			// A design-discussion doc is re-uploaded on Read only to learn whether its design
+			// questions are resolved. When this session already got that answer for this exact
+			// content, repeat it instead of another upsert, Electric echo and model call.
+			const rememberedDesignQuestions = isDesignDiscussion
+				? ledger.designQuestionsFor(fileName, contentHash)
+				: undefined
+			if (
+				syncStatus.synced &&
+				syncStatus.artifactId &&
+				existingArtifact?.storage_type !== 's3' &&
+				rememberedDesignQuestions
+			) {
+				await recordSyncedFile(ledger, fileName, resolvedFilePath)
+				logger.debug({ sessionId, fileName }, 'Design doc read sync skipped: unchanged since the last answer')
+				const cloudUrl = getArtifactCloudUrlFn(syncStatus.artifactId)
+				return {
+					continue: true,
+					hookSpecificOutput: {
+						hookEventName: 'PostToolUse',
+						additionalContext: `${artifactSyncedNote(cloudUrl)}${buildDesignResolvedTemplateContext(rememberedDesignQuestions.designQuestionsResolved, frontmatter.type as string)}`,
+					},
+				}
+			}
+
 			logger.info({ sessionId, filePath }, 'Artifact read sync: upserting (new or changed file)')
 
 			const { artifactId, designQuestionsResolved } = await syncManager.upsertArtifact({
@@ -223,6 +240,7 @@ export function createArtifactReadSyncHook(
 			})
 
 			await recordSyncedFile(ledger, fileName, resolvedFilePath)
+			if (isDesignDiscussion) ledger.recordDesignQuestions(fileName, contentHash, designQuestionsResolved)
 			const cloudUrl = getArtifactCloudUrlFn(artifactId)
 			logger.info(
 				{ sessionId, fileName, contentLength: content.length, artifactId, cloudUrl },

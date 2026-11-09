@@ -20,7 +20,13 @@ const SECONDARY: Record<RiptideModelAlias, LanguageModelV3> = {
 	sonnet: openai('gpt-5'),
 }
 
+// Fork-only: without an OpenAI key the fallback can only fail, and wrapping the primary would retry
+// it up to 4 times first (each Claude Code call may take minutes). Mirrors resolveModel in
+// packages/ai/src/providers/models.ts.
+const isFallbackEnabled = Boolean(process.env.OPENAI_API_KEY?.trim())
+
 export function createRiptideReliableLanguageModel(alias: RiptideModelAlias): LanguageModelV3 {
+	if (!isFallbackEnabled) return PRIMARY[alias]
 	return createReliableLanguageModel({
 		primary: PRIMARY[alias],
 		secondary: SECONDARY[alias],

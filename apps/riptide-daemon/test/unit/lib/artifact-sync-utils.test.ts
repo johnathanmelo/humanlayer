@@ -1,9 +1,12 @@
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
+import matter from 'gray-matter'
 import { describe, expect, test } from 'vitest'
 
+import { createArtifactSyncLedger } from '../../../src/lib/artifact-sync-ledger'
 import {
+	findUnchangedTextRead,
 	getOperationType,
 	getTaskArtifactPathsFromApplyPatch,
 	isApplyPatchTool,
@@ -11,6 +14,8 @@ import {
 	isReadTool,
 	isTextFile,
 	isWriteTool,
+	parseArtifactFrontmatter,
+	rememberDesignQuestions,
 	scanTaskArtifactDirectory,
 } from '../../../src/lib/artifact-sync-utils'
 import { createUniqueTempDir } from '../../helpers/concurrency'
@@ -167,5 +172,73 @@ describe('scanTaskArtifactDirectory', () => {
 		} finally {
 			await rm(cwd, { recursive: true, force: true })
 		}
+	})
+})
+
+describe('parseArtifactFrontmatter', () => {
+	test('returns the frontmatter data', () => {
+		expect(parseArtifactFrontmatter('---\ntype: plan\nstatus: draft\n---\n# Plan')).toEqual({
+			type: 'plan',
+			status: 'draft',
+		})
+	})
+
+	test('returns {} for content without frontmatter or with broken YAML', () => {
+		expect(parseArtifactFrontmatter('# Plan')).toEqual({})
+		expect(parseArtifactFrontmatter('---\ntype: [unclosed\n---\n# Plan')).toEqual({})
+	})
+
+	test("does not keep the parsed document in gray-matter's process-wide cache", () => {
+		const content = `---\ntype: research\n---\n# ${'large document '.repeat(1000)}`
+
+		parseArtifactFrontmatter(content)
+
+		expect(Object.hasOwn(matter.cache, content)).toBe(false)
+	})
+})
+
+describe('findUnchangedTextRead', () => {
+	const syncManagerWith = (contentHash: string) =>
+		({
+			upsertArtifact: async () => ({ artifactId: 'unused' }),
+			uploadS3Artifact: async () => ({ artifactId: 'unused' }),
+			getCollection: () => ({ toArray: [{ file_name: 'doc.md', content_hash: contentHash, id: 'artifact-1' }] }),
+		}) as any
+
+	test('skips the upsert for unchanged content', () => {
+		const ledger = createArtifactSyncLedger()
+		expect(findUnchangedTextRead(syncManagerWith('h1'), ledger, 'doc.md', 'h1', false)).toEqual({
+			artifactId: 'artifact-1',
+		})
+		expect(findUnchangedTextRead(syncManagerWith('h1'), ledger, 'doc.md', 'h2', false)).toBeUndefined()
+	})
+
+	test('needs the design answer for this exact content before skipping a design doc', () => {
+		const ledger = createArtifactSyncLedger()
+		const manager = syncManagerWith('h1')
+		expect(findUnchangedTextRead(manager, ledger, 'doc.md', 'h1', true)).toBeUndefined()
+
+		rememberDesignQuestions(ledger, {
+			artifactId: 'artifact-1',
+			cloudUrl: undefined,
+			fileName: 'doc.md',
+			documentType: 'design-discussion',
+			designQuestionsResolved: false,
+			contentHash: 'h1',
+		})
+		expect(findUnchangedTextRead(manager, ledger, 'doc.md', 'h1', true)).toEqual({
+			artifactId: 'artifact-1',
+			designQuestionsResolved: false,
+		})
+
+		rememberDesignQuestions(ledger, {
+			artifactId: 'artifact-1',
+			cloudUrl: undefined,
+			fileName: 'doc.md',
+			documentType: 'design-discussion',
+			designQuestionsResolved: true,
+			contentHash: 'h0',
+		})
+		expect(findUnchangedTextRead(manager, ledger, 'doc.md', 'h1', true)).toBeUndefined()
 	})
 })
