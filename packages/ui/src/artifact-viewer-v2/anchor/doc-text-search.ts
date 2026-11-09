@@ -100,54 +100,102 @@ interface CharOwner {
 }
 
 /**
- * Flatten the block list into one searchable string plus a per-character owner
- * map back to `(blockIndex, offset)`. Blocks are joined by a single `\n`, which
- * both mirrors {@link pmTextBetween}'s block separator and lets a multi-block
- * quote match contiguously. The separator character is owned by the *end* of
- * the preceding block so a match that lands on it maps to a real block offset.
+ * The block list flattened into one searchable string. Blocks are joined by a
+ * single `\n`, which both mirrors {@link pmTextBetween}'s block separator and
+ * lets a multi-block quote match contiguously. `starts[i]` is where block `i`
+ * begins in `text`; the owner of any character is found with {@link ownerAt}
+ * instead of a per-character table, which for a large document meant one
+ * object per character on every comment resolution.
  */
-function buildBlockConcat(blocks: AnchorBlock[]): { text: string; owners: CharOwner[] } {
-	let text = ''
-	const owners: CharOwner[] = []
-	blocks.forEach((block, blockIndex) => {
-		if (blockIndex > 0) {
-			// Separator owned by the previous block's trailing edge.
-			owners.push({ blockIndex: blockIndex - 1, offset: blocks[blockIndex - 1]!.text.length })
-			text += '\n'
-		}
-		for (let i = 0; i < block.text.length; i++) {
-			owners.push({ blockIndex, offset: i })
-			text += block.text[i]
-		}
-	})
-	return { text, owners }
+export interface BlockConcat {
+	text: string
+	starts: number[]
 }
 
-/** Collapse whitespace runs to one space, keeping a map back to original indices. */
-function normalizeWithMap(text: string): { text: string; map: number[] } {
-	let out = ''
-	const map: number[] = []
-	let inRun = false
-	for (let i = 0; i < text.length; i++) {
-		const ch = text[i]!
-		if (/\s/.test(ch)) {
-			if (!inRun && out.length > 0) {
-				out += ' '
-				map.push(i)
-			}
-			inRun = true
-		} else {
-			out += ch
-			map.push(i)
-			inRun = false
+interface SearchIndex {
+	concat: BlockConcat
+	normalized?: NormalizedText
+	transformed?: NormalizedText
+}
+
+/**
+ * Search data per block list. Every comment of one projection resolves against
+ * the same `AnchorBlock[]`, so the document is flattened and normalized once
+ * instead of once per comment.
+ */
+const searchIndexes = new WeakMap<AnchorBlock[], SearchIndex>()
+
+function searchIndexFor(blocks: AnchorBlock[]): SearchIndex {
+	let index = searchIndexes.get(blocks)
+	if (!index) {
+		index = { concat: buildBlockConcat(blocks) }
+		searchIndexes.set(blocks, index)
+	}
+	return index
+}
+
+export function buildBlockConcat(blocks: AnchorBlock[]): BlockConcat {
+	const starts: number[] = []
+	let offset = 0
+	for (let blockIndex = 0; blockIndex < blocks.length; blockIndex++) {
+		if (blockIndex > 0) offset += 1
+		starts.push(offset)
+		offset += blocks[blockIndex]!.text.length
+	}
+	return { text: blocks.map((block) => block.text).join('\n'), starts }
+}
+
+/**
+ * The block and offset a flat index belongs to. The separator after a block is
+ * owned by that block's trailing edge (offset = its text length), so a match
+ * that lands on it maps to a real block offset.
+ */
+export function ownerAt(concat: BlockConcat, flatIndex: number): CharOwner | null {
+	if (flatIndex < 0 || flatIndex >= concat.text.length) return null
+	let low = 0
+	let high = concat.starts.length - 1
+	while (low < high) {
+		const middle = (low + high + 1) >> 1
+		if (concat.starts[middle]! <= flatIndex) low = middle
+		else high = middle - 1
+	}
+	return { blockIndex: low, offset: flatIndex - concat.starts[low]! }
+}
+
+export interface NormalizedText {
+	text: string
+	/** `map[i]` is the index in the original text of normalized character `i`. */
+	map: ArrayLike<number>
+}
+
+/**
+ * Collapse whitespace runs to one space, keeping a map back to original indices.
+ * Leading and trailing whitespace is dropped. Works run by run rather than
+ * testing a regex on every character.
+ */
+export function normalizeWithMap(text: string): NormalizedText {
+	const parts: string[] = []
+	const map = new Int32Array(text.length)
+	let length = 0
+	let chunkStart = 0
+	const whitespace = /\s+/g
+	for (let run = whitespace.exec(text); run; run = whitespace.exec(text)) {
+		for (let i = chunkStart; i < run.index; i++) map[length++] = i
+		if (run.index > chunkStart) parts.push(text.slice(chunkStart, run.index))
+		if (length > 0) {
+			parts.push(' ')
+			map[length++] = run.index
 		}
+		chunkStart = run.index + run[0].length
 	}
-	// Trim a trailing space produced by a run at the end.
-	if (out.endsWith(' ')) {
-		out = out.slice(0, -1)
-		map.pop()
+	for (let i = chunkStart; i < text.length; i++) map[length++] = i
+	if (chunkStart < text.length) parts.push(text.slice(chunkStart))
+	// Drop the space a run at the very end produced.
+	if (parts.at(-1) === ' ') {
+		parts.pop()
+		length--
 	}
-	return { text: out, map }
+	return { text: parts.join(''), map: map.subarray(0, length) }
 }
 
 /**
@@ -180,24 +228,26 @@ function allIndicesOf(haystack: string, needle: string): number[] {
  */
 export function findQuoteRange(blocks: AnchorBlock[], selectedText: string, startPoint: BlockPoint): QuoteRangeMatch | null {
 	if (selectedText.length === 0) return null
-	const concat = buildBlockConcat(blocks)
+	const index = searchIndexFor(blocks)
+	const { concat } = index
 
 	// Stage A — exact substring in the raw concatenated text.
 	const exact = pickQuoteOccurrence(blocks, concat, allIndicesOf(concat.text, selectedText), selectedText.length, startPoint)
 	if (exact) return exact
 
 	// Stage B — whitespace-normalized search, indices mapped back through the map.
-	const normalizedHaystack = normalizeWithMap(concat.text)
+	index.normalized ??= normalizeWithMap(concat.text)
+	const normalizedHaystack = index.normalized
 	const normalizedNeedle = normalizeAnchorText(selectedText)
 	const normalized = pickNormalizedOccurrence(blocks, concat, normalizedHaystack, normalizedNeedle, startPoint)
 	if (normalized) return normalized
 
 	// Stage C — typographic transforms folded (smart quotes/dashes) on both sides.
-	const transformedHaystack = normalizeWithMap(concat.text)
 	const transformedNeedle = transformQuoteText(selectedText)
 	// Re-normalize the haystack text through the transform for parity.
-	const transformedHay = { text: transformQuoteText(transformedHaystack.text), map: transformedHaystack.map }
-	if (transformedHay.text === transformedHaystack.text.replace(/\s+/g, ' ').trim()) {
+	index.transformed ??= { text: transformQuoteText(normalizedHaystack.text), map: normalizedHaystack.map }
+	const transformedHay = index.transformed
+	if (transformedHay.text === normalizedHaystack.text.replace(/\s+/g, ' ').trim()) {
 		// No typographic characters present — Stage C is identical to Stage B.
 		return null
 	}
@@ -206,7 +256,7 @@ export function findQuoteRange(blocks: AnchorBlock[], selectedText: string, star
 
 function pickQuoteOccurrence(
 	blocks: AnchorBlock[],
-	concat: { text: string; owners: CharOwner[] },
+	concat: BlockConcat,
 	flatStarts: number[],
 	length: number,
 	startPoint: BlockPoint,
@@ -225,8 +275,8 @@ function pickQuoteOccurrence(
 
 function pickNormalizedOccurrence(
 	blocks: AnchorBlock[],
-	concat: { text: string; owners: CharOwner[] },
-	normalizedHaystack: { text: string; map: number[] },
+	concat: BlockConcat,
+	normalizedHaystack: NormalizedText,
 	normalizedNeedle: string,
 	startPoint: BlockPoint,
 ): QuoteRangeMatch | null {
@@ -250,12 +300,12 @@ function pickNormalizedOccurrence(
 /** Map a `[flatStart, flatEnd)` range in the concatenated text to PM positions. */
 function mapFlatRange(
 	blocks: AnchorBlock[],
-	concat: { text: string; owners: CharOwner[] },
+	concat: BlockConcat,
 	flatStart: number,
 	flatEnd: number,
 ): QuoteRangeMatch | null {
-	const startOwner = concat.owners[flatStart]
-	const endOwner = concat.owners[flatEnd - 1]
+	const startOwner = ownerAt(concat, flatStart)
+	const endOwner = ownerAt(concat, flatEnd - 1)
 	if (!startOwner || !endOwner) return null
 	const startBlock = blocks[startOwner.blockIndex]
 	const endBlock = blocks[endOwner.blockIndex]

@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { hash } from 'ohash'
+import { useMemo } from 'react'
 
 import { useArtifactViewerStore } from '@/hooks/stores/artifactViewerStore'
 import { useOrgMembers } from '@/hooks/useOrgMembers'
@@ -43,7 +44,9 @@ export function useArtifactVersions({
 }): ArtifactVersionDiffView {
 	const { queryClient, authScope } = useRiptideApi()
 	const { membersMap } = useOrgMembers()
-	const currentContentHash = hash(currentContent)
+	// Only the version list's query key uses it, and ohash is a JavaScript SHA-256 in the browser:
+	// skip it for a large document whenever the version view is closed.
+	const currentContentHash = useMemo(() => (enabled ? hash(currentContent) : null), [enabled, currentContent])
 	const requestedSelection = useArtifactViewerStore((state) => state.versionSelectionByArtifact[artifactId])
 	const setVersionSelection = useArtifactViewerStore((state) => state.setVersionSelection)
 

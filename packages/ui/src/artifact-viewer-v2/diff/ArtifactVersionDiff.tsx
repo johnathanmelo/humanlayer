@@ -6,6 +6,7 @@ import {
 	type CodeViewStackFile,
 } from '../../components/diff-review/code-view-stack'
 import { useDiffStyle } from '../../components/diff-style-provider'
+import { contentKey } from '../../lib/content-key'
 import { getComparisonDiff, getDiffLineCounts } from '../../lib/diff-review/build-code-view-items'
 
 export interface ArtifactVersionDiffProps {
@@ -21,7 +22,14 @@ const EMPTY_IDS = new Set<string>()
 const ignoreReviewedChange = () => {}
 const ignoreCollapsedChange = () => {}
 
-// Artifact bodies carry no stable content ID, so the comparison is built uncached.
+// Pierre also keys its highlighting by cacheKey, and the name decides the language, so both go in.
+function versionCacheKey(name: string, text: string): string {
+	return `artifact-version:${JSON.stringify(name)}:${contentKey(text)}`
+}
+
+// Artifact bodies carry no stable content ID, so a hash of the text stands in. With it, the
+// line counts, this view's model and the code view share one parsed diff instead of each
+// diffing the two full documents again.
 function artifactComparison({
 	sourceLabel,
 	sourceText,
@@ -30,8 +38,12 @@ function artifactComparison({
 }: ArtifactVersionDiffProps): CodeViewStackComparison {
 	return {
 		fileId: FILE_ID,
-		oldFile: { name: sourceLabel, contents: sourceText },
-		newFile: { name: destinationLabel, contents: destinationText },
+		oldFile: { name: sourceLabel, contents: sourceText, cacheKey: versionCacheKey(sourceLabel, sourceText) },
+		newFile: {
+			name: destinationLabel,
+			contents: destinationText,
+			cacheKey: versionCacheKey(destinationLabel, destinationText),
+		},
 	}
 }
 

@@ -1,7 +1,7 @@
 import { eq, queryOnce } from '@tanstack/react-db'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
-import { isValidElement, type MouseEvent, memo, type ReactNode, useRef } from 'react'
+import { isValidElement, type MouseEvent, memo, type ReactElement, type ReactNode, useRef } from 'react'
 import Markdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
@@ -31,14 +31,33 @@ const COMPONENTS: Components = {
 	},
 }
 
+// Rendering a block (markdown parse plus code highlighting) is the costly part of a large
+// document. The document view keys blocks by index, so a block added near the top hands every
+// later index new text; with this cache those blocks reuse the tree already built for their text
+// instead of parsing again. The sync `Markdown` uses no hooks, so it can be called directly, and
+// its element tree can be rendered again anywhere.
+const RENDERED_BLOCKS_LIMIT = 1000
+const renderedBlocks = new Map<string, ReactElement>()
+
+function renderMarkdown(text: string): ReactElement {
+	const cached = renderedBlocks.get(text)
+	if (cached) {
+		// Re-insert so the Map's order tracks recency.
+		renderedBlocks.delete(text)
+		renderedBlocks.set(text, cached)
+		return cached
+	}
+	const rendered = Markdown({ remarkPlugins: REMARK, rehypePlugins: REHYPE, components: COMPONENTS, children: text })
+	renderedBlocks.set(text, rendered)
+	if (renderedBlocks.size > RENDERED_BLOCKS_LIMIT) {
+		const oldest = renderedBlocks.keys().next().value
+		if (oldest !== undefined) renderedBlocks.delete(oldest)
+	}
+	return rendered
+}
+
 export const Prose = memo(function Prose({ text }: { text: string }) {
-	return (
-		<div className="prose">
-			<Markdown remarkPlugins={REMARK} rehypePlugins={REHYPE} components={COMPONENTS}>
-				{text}
-			</Markdown>
-		</div>
-	)
+	return <div className="prose">{renderMarkdown(text)}</div>
 })
 
 const ORIGINS = {

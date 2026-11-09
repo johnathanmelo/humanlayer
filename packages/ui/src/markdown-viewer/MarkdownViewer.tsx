@@ -98,6 +98,9 @@ export interface MarkdownViewerProps {
 }
 
 const lowlight = createLowlight(all)
+// Fences without a language render as plain text. Otherwise lowlight's highlightAuto tries every
+// registered grammar (about 190), synchronously, on each unlabelled block of a large document.
+const CODE_BLOCK_DEFAULT_LANGUAGE = 'plaintext'
 
 /**
  * Apply comment marks to the editor doc using context-based block matching.
@@ -305,7 +308,7 @@ export function MarkdownViewer({
 				addNodeView() {
 					return ReactNodeViewRenderer(CodeBlockComponent)
 				},
-			}).configure({ lowlight }),
+			}).configure({ lowlight, defaultLanguage: CODE_BLOCK_DEFAULT_LANGUAGE }),
 			CommentMark,
 			CommentGutter.configure({
 				sourceMarkdown: content,

@@ -61,6 +61,32 @@ describe('SectionFoldingExtension', () => {
 		expect(editor.view.dom.querySelectorAll('.artifact-viewer-v2-section-hidden')).toHaveLength(1)
 	})
 
+	test('reapplying the same ranges and folds dispatches nothing', () => {
+		const { editor, outline, ranges } = makeEditor()
+		setSectionFolding(editor.view, ranges, new Set([outline[0]!.id]))
+		let transactions = 0
+		editor.on('transaction', () => {
+			transactions++
+		})
+
+		setSectionFolding(editor.view, ranges, new Set([outline[0]!.id]))
+		expect(transactions).toBe(0)
+
+		setSectionFolding(editor.view, ranges, new Set())
+		expect(transactions).toBe(1)
+	})
+
+	test('a selection-only transaction reuses the built decorations', () => {
+		const { editor, outline, ranges } = makeEditor()
+		setSectionFolding(editor.view, ranges, new Set([outline[0]!.id]))
+		const before = editor.view.someProp('decorations', (f) => f(editor.state))
+
+		editor.commands.setTextSelection(2)
+
+		expect(editor.view.someProp('decorations', (f) => f(editor.state))).toBe(before)
+		expect(editor.view.dom.querySelectorAll('.artifact-viewer-v2-section-hidden')).toHaveLength(3)
+	})
+
 	test('renders the disclosure as a chevron icon, not a text glyph', () => {
 		const { editor } = makeEditor()
 		const button = editor.view.dom.querySelector<HTMLButtonElement>('.artifact-viewer-v2-heading-disclosure')

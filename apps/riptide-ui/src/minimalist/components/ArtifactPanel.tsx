@@ -238,8 +238,8 @@ function DocumentView({
 	const viewingOld = history.readingId !== null
 	const content = viewingOld ? (history.old?.content ?? '') : (artifact?.content ?? '')
 	const blocks = useMemo(() => splitBlocks(body(content)), [content])
-	const texts = blocks.map(plainText)
-	const headings = headingsOf(blocks)
+	const texts = useMemo(() => blocks.map(plainText), [blocks])
+	const headings = useMemo(() => headingsOf(blocks), [blocks])
 	// Parsing every block again is the costly part, so it waits for the text to change.
 	const anchors = useMemo(() => docBlocks(blocks), [blocks])
 	const { comparing, baseContent } = history
@@ -256,7 +256,8 @@ function DocumentView({
 		[comments, active.id],
 	)
 	const rows = (commentsQuery.data ?? []) as ArtifactComment[]
-	const { open, resolved, byBlock } = documentThreads(rows, anchors, texts)
+	// Resolving every thread's anchor walks the document; only redo it when the text or rows change.
+	const { open, resolved, byBlock } = useMemo(() => documentThreads(rows, anchors, texts), [rows, anchors, texts])
 	const linked = focus?.comment
 	// Until the text arrives every thread looks orphaned; placing the link then would scroll to the wrong spot.
 	const focused = linked && content ? threadOf(open, linked) : undefined

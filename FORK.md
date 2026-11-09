@@ -80,6 +80,21 @@ Watch these when you pull from `upstream`:
   - `apps/riptide-daemon/src/agents/claudecode/hooks/artifact-read-sync-hook.ts`,
     `artifact-sync-hook.ts` (Write no longer sends the body twice), `agents/codelayer/hooks.ts`
     and `effects/services/fold-sessions/fold-product-hooks.ts` use them.
+  - `packages/ui/src/artifact-viewer-v2/viewer/useMarkdownViewerV2Editor.ts`
+    (`replaceEditorMarkdown`): an agent edit replaces only the changed range of the open
+    document instead of rebuilding it, so unchanged blocks keep their DOM, node views and code
+    highlighting. Unlabelled code fences default to `plaintext` there and in
+    `markdown-viewer/MarkdownViewer.tsx`, instead of trying every grammar.
+  - `packages/ui/src/artifact-viewer-v2/folding/SectionFoldingExtension.ts` and
+    `viewer/CommentHighlightExtension.ts`: folding decorations are built once per change, not on
+    every view update, and unchanged folds or highlights dispatch nothing.
+  - `packages/ui/src/artifact-viewer-v2/anchor/doc-text-search.ts`: comment anchors search a
+    flattened copy of the document built once per document, without one object per character.
+  - `packages/ui/src/lib/content-key.ts` (new) and `artifact-viewer-v2/diff/ArtifactVersionDiff.tsx`:
+    version diffs are cached by a content key instead of being parsed three times.
+  - `apps/riptide-ui/src/components/artifact-viewer-v2/useArtifactVersions.ts` hashes the document
+    only while the version view is open; `apps/riptide-ui/src/minimalist/components/Prose.tsx` and
+    `ArtifactPanel.tsx` reuse rendered blocks and memoize comment threads.
 - `FORK.md`: this file.
 
 ## What is not in git

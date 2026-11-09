@@ -243,7 +243,16 @@ export function setCommentHighlightProjection(
 ): void {
 	const members = new Set(ranges.map((range) => range.rootCommentId))
 	const active = new Set([...activeRootIds].filter((id) => members.has(id)))
+	// The controller calls this on every render; skip the transaction when nothing changed.
+	const current = commentHighlightPluginKey.getState(view.state)
+	if (current && current.ranges === ranges && sameRootIds(current.activeRootIds, active)) return
 	view.dispatch(view.state.tr.setMeta(commentHighlightPluginKey, { ranges, activeRootIds: active }))
+}
+
+function sameRootIds(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+	if (a.size !== b.size) return false
+	for (const id of a) if (!b.has(id)) return false
+	return true
 }
 
 /** Replace the transient selected/hovered root IDs. Called from user-event handlers. */
