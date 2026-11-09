@@ -115,13 +115,43 @@ check_tools() {
 
 	command -v caddy >/dev/null 2>&1 || die "Caddy is not installed." \
 		"Install it from Caddy's apt repository: https://caddyserver.com/docs/install#debian-ubuntu-raspbian"
-	if command -v getcap >/dev/null 2>&1 && ! getcap "$(command -v caddy)" | grep -q cap_net_bind_service; then
-		warn "Caddy may not be able to listen on ports 80 and 443."
-		warn "Fix it with: sudo setcap cap_net_bind_service=+ep $(command -v caddy)"
-	fi
+	ensure_caddy_can_bind
 	ok "Caddy"
 
 	export PATH="$NODE_DIR:$BUN_DIR:$PATH"
+}
+
+# Caddy serves the app on ports 80 and 443. Linux lets only root bind ports below
+# net.ipv4.ip_unprivileged_port_start (1024 by default), so the Caddy binary needs the
+# cap_net_bind_service file capability. Each apt upgrade of Caddy replaces the binary and drops
+# that capability, so check it on every run instead of letting Caddy fail later in tmux.
+ensure_caddy_can_bind() {
+	local caddy_bin unprivileged_start
+	caddy_bin="$(readlink -f "$(command -v caddy)")"
+	unprivileged_start="$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start 2>/dev/null || echo 1024)"
+	if [ "$unprivileged_start" -le 80 ] 2>/dev/null; then
+		return 0
+	fi
+	if ! command -v getcap >/dev/null 2>&1; then
+		warn "Could not check whether Caddy can listen on ports 80 and 443 (getcap is missing)."
+		warn "Install it with: sudo apt install -y libcap2-bin"
+		return 0
+	fi
+	if getcap "$caddy_bin" | grep -q cap_net_bind_service; then
+		return 0
+	fi
+
+	warn "Caddy cannot listen on ports 80 and 443. Caddy upgrades from apt remove this permission."
+	if [ -t 0 ] && command -v sudo >/dev/null 2>&1; then
+		warn "Granting it with sudo; enter your password if asked."
+		if sudo setcap cap_net_bind_service=+ep "$caddy_bin" && getcap "$caddy_bin" | grep -q cap_net_bind_service; then
+			ok "Caddy can now listen on ports 80 and 443"
+			return 0
+		fi
+	fi
+	die "Caddy cannot listen on ports 80 and 443." \
+		"Fix it with: sudo setcap cap_net_bind_service=+ep $caddy_bin" \
+		"Then run this script again."
 }
 
 check_setup() {
@@ -161,10 +191,18 @@ session_exited() {
 }
 
 show_recent_logs() {
+	local output caddy_error
+	output="$(tmux capture-pane -p -J -t "=$TMUX_SESSION:" -S -5000 2>/dev/null || true)"
 	echo
 	echo "${DIM}Last lines from the app processes (tmux session $TMUX_SESSION):${RESET}"
-	tmux capture-pane -p -J -t "=$TMUX_SESSION:" -S -5000 2>/dev/null |
+	printf '%s\n' "$output" |
 		grep -v '^[[:space:]]*$' | grep -iE 'error|fail|exited|cannot|missing' | tail -15 | cut -c1-220 || true
+	# caddy.log is mostly per-request errors; show only the startup error that stopped Caddy.
+	if printf '%s\n' "$output" | grep -q 'Caddy exited during startup'; then
+		caddy_error="$(grep '"level":"error"' "$STATE_DIR/caddy.log" 2>/dev/null | grep -v '"logger":"http\.log' |
+			tail -1 | sed -n 's/.*"msg":"\([^"]*\)".*/\1/p' || true)"
+		[ -z "$caddy_error" ] || echo "${RED}Caddy:${RESET} $caddy_error"
+	fi
 	echo "${DIM}Full output: tmux attach -t $TMUX_SESSION   (detach with Ctrl+B, then D)${RESET}"
 }
 
