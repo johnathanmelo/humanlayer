@@ -193,7 +193,9 @@ describe('parseArtifactFrontmatter', () => {
 
 		parseArtifactFrontmatter(content)
 
-		expect(Object.hasOwn(matter.cache, content)).toBe(false)
+		// gray-matter's types leave out the process-wide cache it keeps on the function.
+		const { cache } = matter as unknown as { cache: Record<string, unknown> }
+		expect(Object.hasOwn(cache, content)).toBe(false)
 	})
 })
 
