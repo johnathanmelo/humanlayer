@@ -98,6 +98,19 @@ Watch these when you pull from `upstream`:
   - `apps/riptide-ui/vite.config.ts`: the TanStack devtools plugin runs without source injection,
     console piping and enhanced logs. Set `RIPTIDE_UI_FULL_DEVTOOLS=true` in `.env` to turn them
     back on (for example, to click from the devtools to a component's source).
+- Local stack listens on loopback only, so other machines on the network (café or office Wi-Fi)
+  cannot reach it. MinIO uses the default `minioadmin` login and Redis has no password, and the
+  Postgres database holds the Jira and Linear OAuth tokens in plain text.
+  - `docker-compose.yaml` and `docker-compose.test.yml`: every host port is
+    `127.0.0.1:<port>:<container port>`.
+  - `apps/devstack/src/lib/caddy.ts` (`renderCaddyConfig`): the generated Caddyfile starts with
+    `default_bind 127.0.0.1 [::1]`, and `apps/devstack/src/test/caddy.test.ts` checks it.
+  - `apps/riptide-api/src/index.ts` and `apps/riptide-electric-proxy/src/index.ts`: listen on
+    `HUMANLAYER_BIND_HOST` when it is set. `.env` sets it to `127.0.0.1`; when it is unset they
+    listen on every interface, as upstream does (their Docker images need that).
+
+  If you rebuild `.env`, add `HUMANLAYER_BIND_HOST=127.0.0.1` again. To check, run
+  `ss -ltn` and look for `0.0.0.0` or `*` next to the stack's ports.
 - `FORK.md`: this file.
 
 ## What is not in git

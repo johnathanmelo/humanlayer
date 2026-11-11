@@ -19,7 +19,8 @@ async function main(): Promise<void> {
 	}
 
 	const { app } = await import('./app')
-	const server = serve({ fetch: app.fetch, port: PORT })
+	// HUMANLAYER_BIND_HOST=127.0.0.1 keeps a local stack off the network; unset listens on every interface.
+	const server = serve({ fetch: app.fetch, port: PORT, hostname: process.env.HUMANLAYER_BIND_HOST || undefined })
 	if (!(server instanceof Server)) {
 		await appRuntime.dispose()
 		throw new Error(`Expected http.Server but got ${server.constructor.name}`)

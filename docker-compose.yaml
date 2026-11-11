@@ -4,6 +4,10 @@ name: "${DEVSTACK_COMPOSE_PROJECT:-electric_quickstart}"
 # - Postgres, Electric
 # - Minio for S3 emulation
 # - Standalone Redis on port 7100
+#
+# Host ports bind to 127.0.0.1 only, so other machines on the network cannot reach these
+# services (MinIO and Redis use default or no credentials). Containers still reach each other
+# through the compose network.
 
 services:
   postgres:
@@ -13,7 +17,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${DEVSTACK_POSTGRES_PASSWORD:-password}
     ports:
-      - "${DEVSTACK_POSTGRES_PORT:-54321}:5432"
+      - "127.0.0.1:${DEVSTACK_POSTGRES_PORT:-54321}:5432"
     command:
       - -c
       - listen_addresses=*
@@ -35,7 +39,7 @@ services:
       # Unique replication stream ID for the local Electric service
       ELECTRIC_REPLICATION_STREAM_ID: ${DEVSTACK_ELECTRIC_REPLICATION_STREAM_ID:-stable}
     ports:
-      - "${DEVSTACK_ELECTRIC_PORT:-3030}:3000"
+      - "127.0.0.1:${DEVSTACK_ELECTRIC_PORT:-3030}:3000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -50,8 +54,8 @@ services:
       MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-minioadmin}
       MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-minioadmin}
     ports:
-      - "${DEVSTACK_MINIO_API_PORT:-9000}:9000"
-      - "${DEVSTACK_MINIO_CONSOLE_PORT:-9001}:9001"
+      - "127.0.0.1:${DEVSTACK_MINIO_API_PORT:-9000}:9000"
+      - "127.0.0.1:${DEVSTACK_MINIO_CONSOLE_PORT:-9001}:9001"
     command: server /data --console-address ":9001"
     volumes:
       - minio_data:/data
@@ -74,7 +78,7 @@ services:
         DURABLE_STREAMS_SOURCE_COMMIT: cebb50e49c62c534dd714ef84a8a4572e66724b2
     ports:
       # Keep using the already-allocated Durable Streams port in existing manifests.
-      - "${DEVSTACK_DURABLE_STREAMS_PORT:-8642}:4437"
+      - "127.0.0.1:${DEVSTACK_DURABLE_STREAMS_PORT:-8642}:4437"
     environment:
       DS_SERVER__BIND_ADDRESS: 0.0.0.0:4437
       DS_STORAGE__MODE: file-fast
@@ -94,7 +98,7 @@ services:
   redis:
     image: docker.io/redis:7-alpine
     ports:
-      - "${DEVSTACK_REDIS_PORT:-7100}:6379"
+      - "127.0.0.1:${DEVSTACK_REDIS_PORT:-7100}:6379"
     volumes:
       - redis-data:/data
     command: redis-server --appendonly yes

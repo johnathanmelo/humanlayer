@@ -8,7 +8,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${DEVSTACK_TEST_POSTGRES_PASSWORD:-humanlayer_test_password}
     ports:
-      - "${DEVSTACK_TEST_POSTGRES_PORT:-55432}:5432"
+      - "127.0.0.1:${DEVSTACK_TEST_POSTGRES_PORT:-55432}:5432"
     command:
       - -c
       - listen_addresses=*
@@ -31,7 +31,7 @@ services:
       ELECTRIC_SECRET: ${DEVSTACK_TEST_ELECTRIC_SECRET:-humanlayer_test_secret}
       ELECTRIC_REPLICATION_STREAM_ID: ${DEVSTACK_TEST_ELECTRIC_REPLICATION_STREAM_ID:-stable}
     ports:
-      - "${DEVSTACK_TEST_ELECTRIC_PORT:-13030}:3000"
+      - "127.0.0.1:${DEVSTACK_TEST_ELECTRIC_PORT:-13030}:3000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -44,7 +44,7 @@ services:
         DURABLE_STREAMS_SOURCE_COMMIT: cebb50e49c62c534dd714ef84a8a4572e66724b2
     ports:
       # Keep using the already-allocated test Durable Streams port in existing manifests.
-      - "${DEVSTACK_TEST_DURABLE_STREAMS_PORT:-18642}:4437"
+      - "127.0.0.1:${DEVSTACK_TEST_DURABLE_STREAMS_PORT:-18642}:4437"
     environment:
       DS_SERVER__BIND_ADDRESS: 0.0.0.0:4437
       DS_STORAGE__MODE: file-fast
@@ -64,7 +64,7 @@ services:
   redis:
     image: docker.io/redis:8.4-alpine
     ports:
-      - "${DEVSTACK_TEST_REDIS_PORT:-17000}:6379"
+      - "127.0.0.1:${DEVSTACK_TEST_REDIS_PORT:-17000}:6379"
     volumes:
       - humanlayer_test_redis_data:/data
 
