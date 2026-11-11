@@ -109,6 +109,7 @@ packages/ai/eval-results-agentic/
 
 # Riptide artifacts (cloud-synced)
 .humanlayer/tasks/
+/apps/riptide-daemon/.humanlayer/tasks/
 .humanlayer/worktrees.local.json
 .gstack/
 .humanlayer/workspace.local.json
